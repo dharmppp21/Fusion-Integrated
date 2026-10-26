@@ -26,10 +26,6 @@ PERMISSIONS = [
     ("elm.leave.apply", "Apply for leave"),
     ("elm.leave.withdraw_self", "Withdraw own eligible leave applications"),
     ("elm.leave.substitute_respond", "Accept or decline substitute requests"),
-    ("elm.leave.approve", "Approve or reject assigned leave applications"),
-    ("elm.leave.sanction_higher", "Process higher-level leave sanctions"),
-    ("elm.leave.admin", "Administer leave policies, hierarchy and calendar"),
-    ("elm.leave.report.view", "View authorized leave reports"),
 ]
 
 SYSTEM_PERMISSIONS = [
@@ -39,4 +35,19 @@ SYSTEM_PERMISSIONS = [
 
 # Exact designation names must be verified against the ELM specifications
 # and this deployment's IAM designations before granting permissions.
-ROLE_GRANTS = {}
+# Built-in employee kinds documented by Fusion.
+# Substitute-response access is further restricted to the nominated substitute.
+ROLE_GRANTS = {
+    "faculty": [
+        "elm.leave.view_self",
+        "elm.leave.apply",
+        "elm.leave.withdraw_self",
+        "elm.leave.substitute_respond",
+    ],
+    "staff": [
+        "elm.leave.view_self",
+        "elm.leave.apply",
+        "elm.leave.withdraw_self",
+        "elm.leave.substitute_respond",
+    ],
+}

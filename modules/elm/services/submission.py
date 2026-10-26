@@ -6,6 +6,7 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.utils import timezone
 
+from core.api.exceptions import BadRequestError, ConflictError, NotFoundError, PermissionDeniedError
 from modules.directory.models import UserRef
 from modules.elm.models import (
     LeaveApplication,
@@ -82,12 +83,24 @@ def _count_requested_days(leave_code, start_date, end_date, half_day):
 
 
 @transaction.atomic
-def submit_leave(application: LeaveApplication, actor_user_id: int):
+def submit_leave(application: LeaveApplication, actor):
     """Validate and persist a new leave application atomically.
 
     The caller must set applicant_user_id from the authenticated identity,
     not from untrusted request data.
     """
+    actor_user_id = getattr(actor, "user_id", None)
+    has_permission = getattr(actor, "has_permission", None)
+
+    if (
+        actor_user_id is None
+        or not callable(has_permission)
+        or not has_permission("elm.leave.apply")
+    ):
+        raise PermissionDeniedError(
+            "You do not have permission to apply for leave.",
+            code="permission_denied",
+        )
     if application.pk:
         raise ValidationError("Only a new, unsaved application can be submitted.")
 
@@ -234,5 +247,120 @@ def submit_leave(application: LeaveApplication, actor_user_id: int):
         action="submit",
         remarks="Application submitted",
         metadata={"requested_days": str(requested_days)},
+    )
+    return application
+
+
+@transaction.atomic
+def withdraw_leave(*, application_id: int, actor):
+    """Withdraw an applicant's own pending leave application."""
+    actor_user_id = getattr(actor, "user_id", None)
+    has_permission = getattr(actor, "has_permission", None)
+
+    if (
+        actor_user_id is None
+        or not callable(has_permission)
+        or not has_permission("elm.leave.withdraw_self")
+    ):
+        raise PermissionDeniedError(
+            "You do not have permission to withdraw leave.",
+            code="permission_denied",
+        )
+
+    application = (
+        LeaveApplication.objects.select_for_update()
+        .filter(pk=application_id, applicant_user_id=actor_user_id)
+        .first()
+    )
+    if application is None:
+        raise NotFoundError("No such leave application.")
+
+    withdrawable_states = {
+        "awaiting_substitute",
+        "applicant_action",
+        "unit_head_review",
+        "establishment",
+        "final_sanction",
+    }
+    if application.status not in withdrawable_states:
+        raise ConflictError(
+            "Only pending leave applications can be withdrawn.",
+            code="leave_not_withdrawable",
+        )
+
+    previous_status = application.status
+    application.status = "withdrawn"
+    application.save()
+
+    LeaveTransition.objects.create(
+        application=application,
+        from_status=previous_status,
+        to_status="withdrawn",
+        actor_user_id=actor_user_id,
+        action="withdraw",
+        remarks="Application withdrawn by applicant",
+    )
+    return application
+
+
+@transaction.atomic
+def respond_to_substitute(*, application_id: int, actor, response: str):
+    """Accept or decline a request assigned to the authenticated substitute."""
+    actor_user_id = getattr(actor, "user_id", None)
+    has_permission = getattr(actor, "has_permission", None)
+
+    if (
+        actor_user_id is None
+        or not callable(has_permission)
+        or not has_permission("elm.leave.substitute_respond")
+    ):
+        raise PermissionDeniedError(
+            "You do not have permission to respond to substitute requests.",
+            code="permission_denied",
+        )
+
+    if response not in {"accept", "decline"}:
+        raise BadRequestError(
+            "Response must be either 'accept' or 'decline'.",
+            code="invalid_substitute_response",
+        )
+
+    application = (
+        LeaveApplication.objects.select_for_update()
+        .filter(
+            pk=application_id,
+            substitute_user_id=actor_user_id,
+        )
+        .first()
+    )
+    if application is None:
+        raise NotFoundError("No such substitute request.")
+
+    if application.status != "awaiting_substitute":
+        raise ConflictError(
+            "This application is no longer awaiting a substitute response.",
+            code="substitute_response_not_allowed",
+        )
+
+    previous_status = application.status
+    if response == "accept":
+        application.status = "unit_head_review"
+        action = "substitute_accept"
+        remarks = "Nominated substitute accepted responsibility"
+    else:
+        application.status = "applicant_action"
+        action = "substitute_decline"
+        remarks = "Nominated substitute declined; applicant action required"
+
+    application.save()
+
+    LeaveTransition.objects.create(
+        application=application,
+        from_status=previous_status,
+        to_status=application.status,
+        actor_user_id=actor_user_id,
+        action=action,
+        remarks=remarks,
+        metadata={"response": response},
     )
     return application
